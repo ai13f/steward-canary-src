@@ -48,6 +48,20 @@ def _ticker() -> None:
             (DATA / "ticks").write_text(str(n))
 
 
+def _compactor() -> None:
+    """Every 45 s, copy items.log into the compaction area and swap it in."""
+    while True:
+        time.sleep(45)
+        try:
+            src = DATA / "items.log"
+            text = src.read_text() if src.exists() else ""
+            (DATA / "compact" / "items.log").write_text(text)
+            (DATA / "compact" / "items.log").replace(src)
+        except OSError as exc:
+            print(f"fatal: compaction failed: {exc}", file=sys.stderr, flush=True)
+            os._exit(1)
+
+
 class Handler(BaseHTTPRequestHandler):
     def _send(self, code: int, body: dict) -> None:
         raw = json.dumps(body).encode()
@@ -89,6 +103,7 @@ def main() -> int:
         return 3
     print(f"steward-canary {VERSION} schema {applied} listening on :{PORT}", flush=True)
     threading.Thread(target=_ticker, daemon=True).start()
+    threading.Thread(target=_compactor, daemon=True).start()
     ThreadingHTTPServer(("", PORT), Handler).serve_forever()
     return 0
 

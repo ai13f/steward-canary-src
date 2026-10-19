@@ -7,7 +7,7 @@ import time
 
 def uptime_s(started: float) -> float:
     """Seconds since `started` (a time.monotonic() value)."""
-    return round((time.monotonic() - started) * 1000, 3)
+    return round(time.monotonic() - started, 3)
 
 
 def snapshot(started: float, ticks: int, schema_version: int) -> dict:

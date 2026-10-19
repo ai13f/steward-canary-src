@@ -31,7 +31,8 @@ LOCK = threading.Lock()
 def status_payload() -> dict:
     with LOCK:
         ticks = TICKS["n"]
-    return status.snapshot(STARTED, ticks, schema.SCHEMA_VERSION) | {"version": VERSION, "started_at": STARTED_AT}
+    return status.snapshot({"started": STARTED, "ticks": ticks, "schema_version": schema.SCHEMA_VERSION,
+                            "version": VERSION, "started_at": STARTED_AT})
 
 
 def ready() -> bool:

@@ -88,6 +88,7 @@ def main() -> int:
         print(f"refusing to start: {exc}", file=sys.stderr, flush=True)
         return 3
     print(f"steward-canary {VERSION} schema {applied} listening on :{PORT}", flush=True)
+    print(f"ready after {READY_DELAY_S:g}s; data in {DATA}", flush=True)
     threading.Thread(target=_ticker, daemon=True).start()
     ThreadingHTTPServer(("", PORT), Handler).serve_forever()
     return 0

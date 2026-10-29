@@ -175,6 +175,7 @@ def main() -> int:
     LIVE["items"] = load_items()
     print(f"steward-canary {VERSION} schema {applied} format {data_format} items {LIVE['items']} "
           f"listening on :{PORT}", flush=True)
+    print(f"slots: one shared slot (POST /slots/take, /slots/release)", flush=True)
     threading.Thread(target=_ticker, daemon=True).start()
     ThreadingHTTPServer(("", PORT), Handler).serve_forever()
     return 0

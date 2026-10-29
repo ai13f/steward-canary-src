@@ -35,13 +35,23 @@ LIVE = {"clients": 0, "items": 0, "slot_until": 0.0}
 LOCK = threading.Lock()
 
 
+def _item_ts(line: str) -> float:
+    line = line.strip()
+    return float(json.loads(line)["t"]) if line.startswith("{") else float(line)
+
+
 def load_items() -> int:
-    """Count the items on the volume; every line must be a float timestamp."""
+    """Count the items on the volume and store them as JSON lines (one {"t": ...} object per line), the richer form
+    the item API will use."""
     path = DATA / "items.log"
     if not path.exists():
         return 0
     with path.open() as fh:
-        return sum(1 for line in fh if float(line) > 0)
+        stamps = [_item_ts(line) for line in fh if line.strip()]
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text("".join(json.dumps({"t": t}) + "\n" for t in stamps))
+    tmp.replace(path)
+    return len(stamps)
 
 
 def pending() -> int:
@@ -128,7 +138,7 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == "/work":
             n = _count(query)
             with (DATA / "items.log").open("a") as fh:
-                fh.write("".join(f"{time.time():.3f}\n" for _ in range(n)))
+                fh.write("".join(json.dumps({"t": round(time.time(), 3)}) + "\n" for _ in range(n)))
             with LOCK:
                 LIVE["items"] += n
                 items = LIVE["items"]

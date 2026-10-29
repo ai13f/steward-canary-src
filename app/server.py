@@ -20,7 +20,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from app import fmt, migrate, schema, status
+from app import fmt, migrate, schema, status, upgrade
 
 VERSION = os.environ.get("APP_VERSION", "dev")
 DATA = Path(os.environ.get("DATA_DIR", "/data"))
@@ -168,7 +168,11 @@ def main() -> int:
     DATA.mkdir(parents=True, exist_ok=True)
     try:
         applied = migrate.upgrade(DATA, schema.SCHEMA_VERSION)
+        fmt.check(DATA)
+        conversion = upgrade.convert(DATA)
         data_format = fmt.check(DATA)
+        if conversion["converted"]:
+            print(f"converted the volume to format 2 (dropped {conversion['dropped_pending']} pending)", flush=True)
     except (migrate.SchemaTooNew, fmt.FormatTooNew) as exc:
         print(f"refusing to start: {exc}", file=sys.stderr, flush=True)
         return 3

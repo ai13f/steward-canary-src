@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app import fmt, migrate, schema, server
+from app import fmt, migrate, schema, server, upgrade
 
 
 class MigrateTest(unittest.TestCase):
@@ -35,6 +35,11 @@ class FormatTest(unittest.TestCase):
     def test_missing_format_is_format_1(self):
         with tempfile.TemporaryDirectory() as d:
             self.assertEqual(fmt.check(Path(d)), 1)
+
+    def test_conversion_writes_format_2(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertTrue(upgrade.convert(Path(d))["converted"])
+            self.assertEqual(fmt.check(Path(d)), 2)
 
 
 class ItemsTest(unittest.TestCase):

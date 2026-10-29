@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-FORMAT = 1
+FORMAT = 2
 
 
 class FormatTooNew(RuntimeError):

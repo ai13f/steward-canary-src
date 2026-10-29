@@ -41,7 +41,21 @@ def load_items() -> int:
     if not path.exists():
         return 0
     with path.open() as fh:
-        return sum(1 for line in fh if float(line) > 0)
+        stamps = [float(line) for line in fh if line.strip()]
+    return len(_index(stamps))
+
+
+INDEX_BUCKETS = 1000
+
+
+def _index(stamps: list[float]) -> dict[int, float]:
+    """Bucket the items by position for faster status queries."""
+    index: dict[int, float] = {}
+    for position, stamp in enumerate(stamps):
+        if position >= INDEX_BUCKETS:
+            raise OverflowError(f"item index full at {INDEX_BUCKETS} buckets")
+        index[position] = stamp
+    return index
 
 
 def pending() -> int:

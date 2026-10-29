@@ -1,8 +1,12 @@
 """steward-canary: a tiny stateful HTTP service used to prove the image steward's judgment.
 
 Endpoints: /healthz (process up), /readyz (ready after READY_DELAY_S and a valid schema), /status (JSON),
-POST /work (append one item to the data volume). State lives in DATA_DIR: `schema` (applied schema version),
-`ticks` (a counter persisted every few seconds) and `items.log`.
+POST /work[?n=N] (append N items to the data volume), POST /enqueue[?n=N] and POST /drain (a pending-work queue),
+GET /stream[?quiet=1] (a never-ending chunked stream: a "viewer"; quiet streams are not counted in /status.clients),
+POST /slots/take?ttl=S and POST /slots/release (a shared slot another tenant can hold, like a provider line).
+
+State lives in DATA_DIR: `schema` (applied schema version), `format` (file format), `ticks` (a counter persisted
+every few seconds), `items.log` (one float timestamp per line) and `pending.log`.
 """
 
 from __future__ import annotations
@@ -14,24 +18,45 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
-from app import migrate, schema, status
+from app import fmt, migrate, schema, status
 
 VERSION = os.environ.get("APP_VERSION", "dev")
 DATA = Path(os.environ.get("DATA_DIR", "/data"))
 READY_DELAY_S = float(os.environ.get("READY_DELAY_S", "2"))
 PORT = int(os.environ.get("PORT", "8080"))
+CHUNK = b"x" * 4096
 
 STARTED = time.monotonic()
 STARTED_AT = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 TICKS = {"n": 0}
+LIVE = {"clients": 0, "items": 0, "slot_until": 0.0}
 LOCK = threading.Lock()
+
+
+def load_items() -> int:
+    """Count the items on the volume; every line must be a float timestamp."""
+    path = DATA / "items.log"
+    if not path.exists():
+        return 0
+    with path.open() as fh:
+        return sum(1 for line in fh if float(line) > 0)
+
+
+def pending() -> int:
+    path = DATA / "pending.log"
+    return sum(1 for _ in path.open()) if path.exists() else 0
 
 
 def status_payload() -> dict:
     with LOCK:
         ticks = TICKS["n"]
-    return status.snapshot(STARTED, ticks, schema.SCHEMA_VERSION) | {"version": VERSION, "started_at": STARTED_AT}
+        live = dict(LIVE)
+    extra = {"version": VERSION, "started_at": STARTED_AT, "items": live["items"], "clients": live["clients"],
+             "slots_in_use": 1 if live["slot_until"] > time.monotonic() else 0, "pending": pending(),
+             "format": fmt.on_disk(DATA)}
+    return status.snapshot(STARTED, ticks, schema.SCHEMA_VERSION) | extra
 
 
 def ready() -> bool:
@@ -48,7 +73,13 @@ def _ticker() -> None:
             (DATA / "ticks").write_text(str(n))
 
 
+def _count(query: dict) -> int:
+    return max(1, min(100000, int((query.get("n") or ["1"])[0])))
+
+
 class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
     def _send(self, code: int, body: dict) -> None:
         raw = json.dumps(body).encode()
         self.send_response(code)
@@ -57,26 +88,79 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(raw)
 
+    def _stream(self, quiet: bool) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        if not quiet:
+            with LOCK:
+                LIVE["clients"] += 1
+        try:
+            while True:
+                self.wfile.write(b"%x\r\n%s\r\n" % (len(CHUNK), CHUNK))
+                self.wfile.flush()
+                time.sleep(0.1)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        finally:
+            if not quiet:
+                with LOCK:
+                    LIVE["clients"] -= 1
+            self.close_connection = True
+
     def do_GET(self) -> None:  # noqa: N802
-        if self.path == "/healthz":
+        url = urlparse(self.path)
+        if url.path == "/healthz":
             self._send(200, {"ok": True})
-        elif self.path == "/readyz":
+        elif url.path == "/readyz":
             self._send(200 if ready() else 503, {"ready": ready()})
-        elif self.path == "/status":
+        elif url.path == "/status":
             self._send(200, status_payload())
+        elif url.path == "/stream":
+            self._stream(quiet=parse_qs(url.query).get("quiet") == ["1"])
         else:
             self._send(404, {"error": "not found"})
 
     def do_POST(self) -> None:  # noqa: N802
-        if self.path != "/work":
+        url = urlparse(self.path)
+        query = parse_qs(url.query)
+        if url.path == "/work":
+            n = _count(query)
+            with (DATA / "items.log").open("a") as fh:
+                fh.write("".join(f"{time.time():.3f}\n" for _ in range(n)))
+            with LOCK:
+                LIVE["items"] += n
+                items = LIVE["items"]
+            self._send(200, {"items": items})
+        elif url.path == "/enqueue":
+            n = _count(query)
+            with (DATA / "pending.log").open("a") as fh:
+                fh.write("".join(f"{time.time():.3f}\n" for _ in range(n)))
+            self._send(200, {"pending": pending()})
+        elif url.path == "/drain":
+            path = DATA / "pending.log"
+            moved = pending()
+            if moved:
+                with (DATA / "items.log").open("a") as fh:
+                    fh.write(path.read_text())
+                path.unlink()
+                with LOCK:
+                    LIVE["items"] += moved
+            self._send(200, {"drained": moved, "pending": 0})
+        elif url.path == "/slots/take":
+            ttl = float((query.get("ttl") or ["60"])[0])
+            with LOCK:
+                LIVE["slot_until"] = time.monotonic() + ttl
+            self._send(200, {"slots_in_use": 1, "ttl": ttl})
+        elif url.path == "/slots/release":
+            with LOCK:
+                LIVE["slot_until"] = 0.0
+            self._send(200, {"slots_in_use": 0})
+        else:
             self._send(404, {"error": "not found"})
-            return
-        with (DATA / "items.log").open("a") as fh:
-            fh.write(f"{time.time():.3f}\n")
-        items = sum(1 for _ in (DATA / "items.log").open())
-        self._send(200, {"items": items})
 
-    def log_message(self, fmt: str, *args) -> None:  # quiet access log
+    def log_message(self, fmt_: str, *args) -> None:  # quiet access log
         pass
 
 
@@ -84,10 +168,13 @@ def main() -> int:
     DATA.mkdir(parents=True, exist_ok=True)
     try:
         applied = migrate.upgrade(DATA, schema.SCHEMA_VERSION)
-    except migrate.SchemaTooNew as exc:
+        data_format = fmt.check(DATA)
+    except (migrate.SchemaTooNew, fmt.FormatTooNew) as exc:
         print(f"refusing to start: {exc}", file=sys.stderr, flush=True)
         return 3
-    print(f"steward-canary {VERSION} schema {applied} listening on :{PORT}", flush=True)
+    LIVE["items"] = load_items()
+    print(f"steward-canary {VERSION} schema {applied} format {data_format} items {LIVE['items']} "
+          f"listening on :{PORT}", flush=True)
     threading.Thread(target=_ticker, daemon=True).start()
     ThreadingHTTPServer(("", PORT), Handler).serve_forever()
     return 0
